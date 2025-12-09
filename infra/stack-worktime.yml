@@ -1,0 +1,184 @@
+﻿# Docker Swarm stack для worktime-platform.
+# Шпаргалка для запуска:
+# 1) Инициализация кластера:    docker swarm init --advertise-addr <manager-1-ip>
+# 2) Подключение воркеров:      docker swarm join --token <worker-token> <manager-1-ip>:2377
+# 3) Деплой стека:              docker stack deploy -c stack-worktime.yml worktime
+# 4) Проверка сервисов:         docker service ls
+# 5) Проверка задач сервиса:    docker service ps worktime_api
+# 6) Логи сервиса:              docker service logs -f worktime_api
+
+version: "3.9"
+
+services:
+  traefik:
+    image: traefik:v2.11
+    # Traefik — входная точка кластера, слушает порт 80 и раздаёт трафик по маршрутам.
+    command:
+      - --providers.docker=true
+      - --providers.docker.swarmMode=true
+      - --providers.docker.exposedbydefault=false
+      - --entrypoints.web.address=:80
+      - --api.dashboard=true
+    ports:
+      - "80:80" # публикуем HTTP на всех менеджерах/воркерах с меткой role=manager
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - proxy
+    deploy:
+      replicas: 2  # 1-2 реплики достаточно для демонстрации отказоустойчивости точки входа
+      placement:
+        # В учебном примере фиксируем Traefik на менеджерах (обычно публичный IP у manager-1)
+        constraints:
+          - node.labels.role == manager
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+        reservations:
+          cpus: "0.1"
+          memory: 64M
+      labels:
+        # Dashboard Traefik по пути /traefik (StripPrefix + BasicAuth)
+        - "traefik.enable=true"
+        - "traefik.http.routers.traefik-dashboard.rule=PathPrefix(`/traefik`) || PathPrefix(`/dashboard`) || PathPrefix(`/api/rawdata`)"
+        - "traefik.http.routers.traefik-dashboard.entrypoints=web"
+        - "traefik.http.routers.traefik-dashboard.service=api@internal"
+        - "traefik.http.routers.traefik-dashboard.middlewares=traefik-auth,traefik-strip"
+        # Дефолт с htpasswd (admin/admin). Доллары экранированы двойным $$, чтобы Swarm не интерпретировал их как переменные.
+        - "traefik.http.middlewares.traefik-auth.basicauth.users=${TRAEFIK_BASIC_AUTH:-admin:$$apr1$$H6uskkkW$$IgXLP6ewTrSuBkTrqE8wj/}"
+        - "traefik.http.middlewares.traefik-strip.stripprefix.prefixes=/traefik"
+
+  api:
+    image: worktime-api:latest
+    # В реальном деплое этот образ должен быть заранее собран и запушен в регистр.
+    env_file: .env
+    environment:
+      - APP_DATABASE_URL=${APP_DATABASE_URL}
+    networks:
+      - proxy    # для публикации через Traefik
+      - backend  # внутренняя сеть к PostgreSQL и pgAdmin
+    deploy:
+      replicas: 2  # 2-3 реплики для балансировки нагрузки
+      placement:
+        constraints:
+          - node.labels.role == worker
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+        reservations:
+          cpus: "0.2"
+          memory: 128M
+      labels:
+        - "traefik.enable=true"
+        - "traefik.http.routers.api.rule=PathPrefix(`/api`)"
+        - "traefik.http.routers.api.entrypoints=web"
+        - "traefik.http.routers.api.middlewares=api-strip"
+        - "traefik.http.services.api.loadbalancer.server.port=8000"
+        - "traefik.http.middlewares.api-strip.stripprefix.prefixes=/api"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')\""]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  web:
+    image: worktime-web:latest
+    # Сервис отдаёт статический фронтенд (nginx). Traefik маршрутизирует трафик на /.
+    networks:
+      - proxy
+    deploy:
+      replicas: 2  # 2-3 реплики SPA-дистрибутива, статический контент легко балансируется
+      placement:
+        constraints:
+          - node.labels.role == worker
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+        reservations:
+          cpus: "0.1"
+          memory: 64M
+      labels:
+        - "traefik.enable=true"
+        - "traefik.http.routers.web.rule=PathPrefix(`/`)"
+        - "traefik.http.routers.web.entrypoints=web"
+        - "traefik.http.services.web.loadbalancer.server.port=80"
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /usr/share/nginx/html/index.html"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  db:
+    image: postgres:16
+    env_file: .env
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=${POSTGRES_DB}
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    networks:
+      - backend
+    deploy:
+      placement:
+        # Фиксируем СУБД на узле с меткой role=db (или manager) для предсказуемого хранения данных.
+        constraints:
+          - node.labels.role == db
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1G
+        reservations:
+          cpus: "0.5"
+          memory: 512M
+
+  pgadmin:
+    image: dpage/pgadmin4:8.4
+    env_file: .env
+    environment:
+      - PGADMIN_DEFAULT_EMAIL=${PGADMIN_DEFAULT_EMAIL}
+      - PGADMIN_DEFAULT_PASSWORD=${PGADMIN_DEFAULT_PASSWORD}
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+    networks:
+      - backend
+      - proxy
+    deploy:
+      placement:
+        # Админка на том же узле, где и БД (для минимизации латентности).
+        constraints:
+          - node.labels.role == db
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+        reservations:
+          cpus: "0.1"
+          memory: 64M
+      labels:
+        - "traefik.enable=true"
+        - "traefik.http.routers.pgadmin.rule=PathPrefix(`/pgadmin`)"
+        - "traefik.http.routers.pgadmin.entrypoints=web"
+        - "traefik.http.routers.pgadmin.middlewares=pgadmin-strip"
+        - "traefik.http.services.pgadmin.loadbalancer.server.port=80"
+        - "traefik.http.middlewares.pgadmin-strip.stripprefix.prefixes=/pgadmin"
+
+# Сети overlay:
+# proxy   — публичная точка входа; Traefik подключён к ней и раздаёт трафик на web/api/pgadmin.
+# backend — приватная сеть для сервисов данных (api, db, pgadmin); недоступна снаружи.
+networks:
+  proxy:
+    driver: overlay
+    attachable: true
+  backend:
+    driver: overlay
+    attachable: true
+
+volumes:
+  db_data:
+  pgadmin_data:

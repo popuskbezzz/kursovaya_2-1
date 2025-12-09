@@ -1,0 +1,127 @@
+﻿# Docker Compose для локальной демонстрации worktime-platform.
+# Запускает: Traefik (reverse-proxy), frontend (web), backend (api), PostgreSQL (db), pgAdmin.
+# (Compose v2) Без явного поля version — избегаем предупреждения об устаревшей опции.
+
+services:
+  traefik:
+    image: traefik:v2.11
+    container_name: worktime-traefik
+    command:
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
+      - --entrypoints.web.address=:80
+      # Включаем dashboard (оборачиваем basic auth через middleware traefik-auth).
+      - --api.dashboard=true
+    ports:
+      - "80:80" # точка входа для всего трафика
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - proxy
+    labels:
+      # Dashboard Traefik по пути /traefik (ограничен базовой авторизацией).
+      - "traefik.enable=true"
+      # Важно: dashboard тянет ресурсы с путей /dashboard и /api/rawdata, поэтому включаем их в правило.
+      - "traefik.http.routers.traefik-dashboard.rule=PathPrefix(`/traefik`) || PathPrefix(`/dashboard`) || PathPrefix(`/api/rawdata`)"
+      - "traefik.http.routers.traefik-dashboard.entrypoints=web"
+      - "traefik.http.routers.traefik-dashboard.service=api@internal"
+      - "traefik.http.routers.traefik-dashboard.middlewares=traefik-auth,traefik-stripprefix"
+      # Дефолт с заранее сгенерированным htpasswd (admin / admin). Доллары экранированы двойным $$, чтобы Compose не считал их переменными.
+      - "traefik.http.middlewares.traefik-auth.basicauth.users=${TRAEFIK_BASIC_AUTH:-admin:$$apr1$$H6uskkkW$$IgXLP6ewTrSuBkTrqE8wj/}"
+      - "traefik.http.middlewares.traefik-stripprefix.stripprefix.prefixes=/traefik"
+
+  api:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+    platform: linux/amd64  # фиксируем linux-образ, иначе на Windows может выбраться windows-слой без apt
+    container_name: worktime-api
+    env_file:
+      - ../infra/.env
+    environment:
+      # URL БД для FastAPI (asyncpg). Пример в .env.example.
+      - APP_DATABASE_URL=${APP_DATABASE_URL}
+    depends_on:
+      - db
+    networks:
+      - proxy   # нужно, чтобы Traefik мог достучаться до API
+      - backend # внутренняя сеть для доступа к PostgreSQL
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.api.rule=PathPrefix(`/api`)"
+      - "traefik.http.routers.api.entrypoints=web"
+      - "traefik.http.routers.api.middlewares=api-stripprefix"
+      - "traefik.http.services.api.loadbalancer.server.port=8000"
+      - "traefik.http.middlewares.api-stripprefix.stripprefix.prefixes=/api"
+
+  web:
+    build:
+      context: ../frontend
+      dockerfile: Dockerfile
+    platform: linux/amd64
+    container_name: worktime-web
+    env_file:
+      - ../infra/.env
+    environment:
+      # Vite использует VITE_API_URL на этапе сборки, поэтому задаём её здесь.
+      - VITE_API_URL=${VITE_API_URL}
+    depends_on:
+      - api
+    networks:
+      - proxy
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.web.rule=PathPrefix(`/`)"
+      - "traefik.http.routers.web.entrypoints=web"
+      - "traefik.http.services.web.loadbalancer.server.port=80"
+
+  db:
+    image: postgres:16
+    container_name: worktime-db
+    restart: unless-stopped
+    env_file:
+      - ../infra/.env
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=${POSTGRES_DB}
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    networks:
+      - backend
+
+  pgadmin:
+    image: dpage/pgadmin4:8.4
+    container_name: worktime-pgadmin
+    env_file:
+      - ../infra/.env
+    environment:
+      - PGADMIN_DEFAULT_EMAIL=${PGADMIN_DEFAULT_EMAIL}
+      - PGADMIN_DEFAULT_PASSWORD=${PGADMIN_DEFAULT_PASSWORD}
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+    depends_on:
+      - db
+    networks:
+      - backend
+      - proxy
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.pgadmin.rule=PathPrefix(`/pgadmin`)"
+      - "traefik.http.routers.pgadmin.entrypoints=web"
+      - "traefik.http.routers.pgadmin.middlewares=pgadmin-stripprefix"
+      - "traefik.http.services.pgadmin.loadbalancer.server.port=80"
+      - "traefik.http.middlewares.pgadmin-stripprefix.stripprefix.prefixes=/pgadmin"
+
+# Сети:
+# proxy   — публичная точка входа, где висит Traefik и куда подключаются web/api/pgadmin для публикации.
+# backend — приватная сеть для взаимодействия api <-> db/pgadmin. Traefik сюда не имеет доступа.
+networks:
+  proxy:
+    driver: bridge
+  backend:
+    driver: bridge
+
+volumes:
+  db_data:
+  pgadmin_data:
