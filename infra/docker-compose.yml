@@ -1,34 +1,24 @@
-﻿# Docker Compose для локальной демонстрации worktime-platform.
+# Docker Compose для локальной демонстрации worktime-platform.
 # Запускает: Traefik (reverse-proxy), frontend (web), backend (api), PostgreSQL (db), pgAdmin.
-# (Compose v2) Без явного поля version — избегаем предупреждения об устаревшей опции.
 
 services:
   traefik:
     image: traefik:v2.11
     container_name: worktime-traefik
-    command:
-      - --providers.docker=true
-      - --providers.docker.exposedbydefault=false
-      - --entrypoints.web.address=:80
-      # Включаем dashboard (оборачиваем basic auth через middleware traefik-auth).
-      - --api.dashboard=true
+    command: ["--configfile=/etc/traefik/traefik.yml"]
     ports:
-      - "80:80" # точка входа для всего трафика
+      - "80:80" # публичная точка входа
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./traefik/traefik.yml:/etc/traefik/traefik.yml:ro
+      - ./traefik/traefik_dynamic.yml:/etc/traefik/traefik_dynamic.yml:ro
+    env_file:
+      - ./.env
     networks:
       - proxy
     labels:
-      # Dashboard Traefik по пути /traefik (ограничен базовой авторизацией).
-      - "traefik.enable=true"
-      # Важно: dashboard тянет ресурсы с путей /dashboard и /api/rawdata, поэтому включаем их в правило.
-      - "traefik.http.routers.traefik-dashboard.rule=PathPrefix(`/traefik`) || PathPrefix(`/dashboard`) || PathPrefix(`/api/rawdata`)"
-      - "traefik.http.routers.traefik-dashboard.entrypoints=web"
-      - "traefik.http.routers.traefik-dashboard.service=api@internal"
-      - "traefik.http.routers.traefik-dashboard.middlewares=traefik-auth,traefik-stripprefix"
-      # Дефолт с заранее сгенерированным htpasswd (admin / admin). Доллары экранированы двойным $$, чтобы Compose не считал их переменными.
-      - "traefik.http.middlewares.traefik-auth.basicauth.users=${TRAEFIK_BASIC_AUTH:-admin:$$apr1$$H6uskkkW$$IgXLP6ewTrSuBkTrqE8wj/}"
-      - "traefik.http.middlewares.traefik-stripprefix.stripprefix.prefixes=/traefik"
+      # Не публикуем traefik-сервис через docker provider (dashboard описан в dynamic-файле).
+      - "traefik.enable=false"
 
   api:
     build:
@@ -41,11 +31,23 @@ services:
     environment:
       # URL БД для FastAPI (asyncpg). Пример в .env.example.
       - APP_DATABASE_URL=${APP_DATABASE_URL}
+      - APP_BACKEND_CORS_ORIGINS=${BACKEND_CORS_ORIGINS:-http://localhost,http://localhost:80,http://localhost:5173}
+      - APP_SERVER_HOST=0.0.0.0
+      - APP_SERVER_PORT=8000
     depends_on:
       - db
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')\""]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
     networks:
       - proxy   # нужно, чтобы Traefik мог достучаться до API
       - backend # внутренняя сеть для доступа к PostgreSQL
+    ports:
+      - "8000:8000"  # прямой доступ для отладки; основной трафик идёт через Traefik
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.api.rule=PathPrefix(`/api`)"
@@ -69,6 +71,13 @@ services:
       - api
     networks:
       - proxy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /usr/share/nginx/html/index.html"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.web.rule=PathPrefix(`/`)"
@@ -89,6 +98,13 @@ services:
       - db_data:/var/lib/postgresql/data
     networks:
       - backend
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    ports:
+      - "5432:5432"
 
   pgadmin:
     image: dpage/pgadmin4:8.4
@@ -98,6 +114,11 @@ services:
     environment:
       - PGADMIN_DEFAULT_EMAIL=${PGADMIN_DEFAULT_EMAIL}
       - PGADMIN_DEFAULT_PASSWORD=${PGADMIN_DEFAULT_PASSWORD}
+      - SCRIPT_NAME=/pgadmin
+      - PGADMIN_CONFIG_PROXY_X_FOR_COUNT=1
+      - PGADMIN_CONFIG_PROXY_X_HOST_COUNT=1
+      - PGADMIN_CONFIG_PROXY_X_PROTO_COUNT=1
+      - PGADMIN_CONFIG_ENHANCED_COOKIE_PROTECTION=False
     volumes:
       - pgadmin_data:/var/lib/pgadmin
     depends_on:
@@ -105,13 +126,17 @@ services:
     networks:
       - backend
       - proxy
+    restart: unless-stopped
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.pgadmin.rule=PathPrefix(`/pgadmin`)"
       - "traefik.http.routers.pgadmin.entrypoints=web"
-      - "traefik.http.routers.pgadmin.middlewares=pgadmin-stripprefix"
+      - "traefik.http.routers.pgadmin.middlewares=pgadmin-stripprefix,pgadmin-headers"
       - "traefik.http.services.pgadmin.loadbalancer.server.port=80"
       - "traefik.http.middlewares.pgadmin-stripprefix.stripprefix.prefixes=/pgadmin"
+      - "traefik.http.middlewares.pgadmin-headers.headers.customrequestheaders.X-Script-Name=/pgadmin"
+      - "traefik.http.middlewares.pgadmin-headers.headers.customrequestheaders.X-Scheme=http"
+      - "traefik.http.middlewares.pgadmin-headers.headers.customrequestheaders.X-Forwarded-Prefix=/pgadmin"
 
 # Сети:
 # proxy   — публичная точка входа, где висит Traefik и куда подключаются web/api/pgadmin для публикации.

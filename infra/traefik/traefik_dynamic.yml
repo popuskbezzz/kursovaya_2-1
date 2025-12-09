@@ -1,0 +1,33 @@
+http:
+  middlewares:
+    traefik-auth:
+      basicAuth:
+        users:
+          - "${TRAEFIK_BASIC_AUTH}"
+    traefik-stripprefix:
+      stripPrefix:
+        prefixes:
+          - "/traefik"
+    api-stripprefix:
+      stripPrefix:
+        prefixes:
+          - "/api"
+    pgadmin-stripprefix:
+      stripPrefix:
+        prefixes:
+          - "/pgadmin"
+    pgadmin-headers:
+      headers:
+        customRequestHeaders:
+          X-Script-Name: "/pgadmin"
+          X-Scheme: "http"
+          X-Forwarded-Prefix: "/pgadmin"
+  routers:
+    traefik-dashboard:
+      entryPoints:
+        - web
+      rule: "PathPrefix(`/traefik`) || PathPrefix(`/dashboard`) || PathPrefix(`/api/rawdata`)"
+      service: api@internal
+      middlewares:
+        - traefik-auth
+        - traefik-stripprefix
