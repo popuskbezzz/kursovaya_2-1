@@ -1,0 +1,7 @@
+http:
+  middlewares:
+    # Общий basic auth для dashboard. Значение можно переопределить через переменную окружения.
+    dashboard-auth:
+      basicAuth:
+        users:
+          - "${TRAEFIK_BASIC_AUTH:-admin:$$apr1$$Y9k5Uj1O$$TtyS4cYvhha3U07wpWQ3X.}"

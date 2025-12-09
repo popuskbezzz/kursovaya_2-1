@@ -1,6 +1,4 @@
 ﻿"""Создание подключений к базе и фабрики сессий."""
-from contextlib import asynccontextmanager
-
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import declarative_base
 
@@ -16,15 +14,12 @@ engine = create_async_engine(settings.database_url, future=True, echo=False)
 SessionLocal = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
 
 
-@asynccontextmanager
 async def get_session() -> AsyncSession:
     """Возвращает сессию как зависимость FastAPI, с управлением commit/rollback."""
-    session: AsyncSession = SessionLocal()
-    try:
-        yield session
-        await session.commit()
-    except Exception:
-        await session.rollback()
-        raise
-    finally:
-        await session.close()
+    async with SessionLocal() as session:
+        try:
+            yield session
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            raise
