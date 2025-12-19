@@ -1,5 +1,6 @@
 ﻿"""Маршруты API: проекты, задачи, учёт времени и демо-данные."""
 from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.crud import projects, tasks, time_entries, users
@@ -13,9 +14,13 @@ api_router = APIRouter()
 
 
 @api_router.get('/health')
-async def healthcheck() -> dict:
-    """Простой health-check для мониторинга."""
-    return {'status': 'ok'}
+async def healthcheck(session: AsyncSession = Depends(get_session)) -> dict:
+    """Health-check с проверкой доступности БД."""
+    try:
+        await session.execute(text("SELECT 1"))
+    except Exception:
+        raise HTTPException(status_code=503, detail="database unavailable")
+    return {"status": "ok"}
 
 
 @api_router.post('/projects', response_model=ProjectRead)
