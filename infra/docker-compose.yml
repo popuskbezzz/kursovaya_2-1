@@ -55,7 +55,6 @@ services:
     build:
       context: ../frontend
       dockerfile: Dockerfile
-    platform: linux/amd64
     container_name: worktime-web
     env_file:
       - ../infra/.env

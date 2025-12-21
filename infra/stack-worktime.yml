@@ -1,11 +1,10 @@
-﻿# Docker Swarm stack для worktime-platform.
+# Docker Swarm stack для worktime-platform (локальный учебный деплой).
 # Шпаргалка для запуска:
-# 1) Инициализация кластера:    docker swarm init --advertise-addr <manager-1-ip>
-# 2) Подключение воркеров:      docker swarm join --token <worker-token> <manager-1-ip>:2377
-# 3) Деплой стека:              docker stack deploy -c stack-worktime.yml worktime
-# 4) Проверка сервисов:         docker service ls
-# 5) Проверка задач сервиса:    docker service ps worktime_api
-# 6) Логи сервиса:              docker service logs -f worktime_api
+# 1) Инициализация кластера:    docker swarm init
+# 2) Деплой стека:              docker stack deploy -c infra/stack-worktime.yml worktime
+# 3) Проверка сервисов:         docker service ls
+# 4) Проверка задач сервиса:    docker service ps worktime_api
+# 5) Логи сервиса:              docker service logs -f worktime_api
 
 version: "3.9"
 
@@ -20,17 +19,13 @@ services:
       - --entrypoints.web.address=:80
       - --api.dashboard=true
     ports:
-      - "80:80" # публикуем HTTP на всех менеджерах/воркерах с меткой role=manager
+      - "80:80"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     networks:
       - proxy
     deploy:
-      replicas: 2  # 1-2 реплики достаточно для демонстрации отказоустойчивости точки входа
-      placement:
-        # В учебном примере фиксируем Traefik на менеджерах (обычно публичный IP у manager-1)
-        constraints:
-          - node.labels.role == manager
+      replicas: 1
       resources:
         limits:
           cpus: "0.5"
@@ -51,18 +46,13 @@ services:
 
   api:
     image: worktime-api:latest
-    # В реальном деплое этот образ должен быть заранее собран и запушен в регистр.
-    env_file: .env
     environment:
-      - APP_DATABASE_URL=${APP_DATABASE_URL}
+      - APP_DATABASE_URL=${APP_DATABASE_URL:-postgresql+asyncpg://worktime:worktime_password@db:5432/worktime_db}
     networks:
-      - proxy    # для публикации через Traefik
-      - backend  # внутренняя сеть к PostgreSQL и pgAdmin
+      - proxy
+      - backend
     deploy:
-      replicas: 2  # 2-3 реплики для балансировки нагрузки
-      placement:
-        constraints:
-          - node.labels.role == worker
+      replicas: 1
       resources:
         limits:
           cpus: "1.0"
@@ -90,10 +80,7 @@ services:
     networks:
       - proxy
     deploy:
-      replicas: 2  # 2-3 реплики SPA-дистрибутива, статический контент легко балансируется
-      placement:
-        constraints:
-          - node.labels.role == worker
+      replicas: 1
       resources:
         limits:
           cpus: "0.5"
@@ -115,20 +102,16 @@ services:
 
   db:
     image: postgres:16
-    env_file: .env
     environment:
-      - POSTGRES_USER=${POSTGRES_USER}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
-      - POSTGRES_DB=${POSTGRES_DB}
+      - POSTGRES_USER=${POSTGRES_USER:-worktime}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-worktime_password}
+      - POSTGRES_DB=${POSTGRES_DB:-worktime_db}
     volumes:
       - db_data:/var/lib/postgresql/data
     networks:
       - backend
     deploy:
-      placement:
-        # Фиксируем СУБД на узле с меткой role=db (или manager) для предсказуемого хранения данных.
-        constraints:
-          - node.labels.role == db
+      replicas: 1
       resources:
         limits:
           cpus: "1.0"
@@ -139,20 +122,20 @@ services:
 
   pgadmin:
     image: dpage/pgadmin4:8.4
-    env_file: .env
     environment:
-      - PGADMIN_DEFAULT_EMAIL=${PGADMIN_DEFAULT_EMAIL}
-      - PGADMIN_DEFAULT_PASSWORD=${PGADMIN_DEFAULT_PASSWORD}
+      - PGADMIN_DEFAULT_EMAIL=${PGADMIN_DEFAULT_EMAIL:-admin@example.com}
+      - PGADMIN_DEFAULT_PASSWORD=${PGADMIN_DEFAULT_PASSWORD:-admin123}
+      - PGADMIN_LISTEN_PORT=${PGADMIN_LISTEN_PORT:-80}
+      - PGADMIN_CONFIG_SERVER_MODE=${PGADMIN_CONFIG_SERVER_MODE:-False}
+      - PGADMIN_CONFIG_ENHANCED_COOKIE_PROTECTION=${PGADMIN_CONFIG_ENHANCED_COOKIE_PROTECTION:-True}
+      - PGADMIN_CONFIG_PROXY_X_HEADERS=${PGADMIN_CONFIG_PROXY_X_HEADERS:-True}
     volumes:
       - pgadmin_data:/var/lib/pgadmin
     networks:
       - backend
       - proxy
     deploy:
-      placement:
-        # Админка на том же узле, где и БД (для минимизации латентности).
-        constraints:
-          - node.labels.role == db
+      replicas: 1
       resources:
         limits:
           cpus: "0.5"

@@ -1,10 +1,8 @@
-﻿# GitLab CI для worktime-platform.
-# Покрывает сборку Docker-образов (api, web), пуш в GitLab Registry и деплой стека в Docker Swarm через SSH.
-# В GitLab нужно задать переменные CI/CD:
-# - CI_REGISTRY, CI_REGISTRY_IMAGE, CI_REGISTRY_USER, CI_REGISTRY_PASSWORD (обычно проставляются автоматически)
-# - SSH_HOST, SSH_USER, SSH_PRIVATE_KEY (доступ к manager-узлу Swarm)
-# - STACK_NAME (имя стека, по умолчанию worktime)
-# - TRAEFIK_BASIC_AUTH, POSTGRES_*, APP_DATABASE_URL, PGADMIN_* (используются в .env на сервере)
+# GitLab CI для worktime-platform.
+# Локальная сборка образов (api, web) и деплой в Docker Swarm без SSH.
+# Требование: runner должен иметь доступ к Docker daemon хоста (/var/run/docker.sock).
+# Переменные CI/CD (в GitLab или в .env при локальном запуске runner):
+# - TRAEFIK_BASIC_AUTH, POSTGRES_*, APP_DATABASE_URL, PGADMIN_* (используются в stack)
 
 stages:
   - build
@@ -12,33 +10,19 @@ stages:
 
 image: docker:24.0.7
 
-services:
-  - name: docker:dind
-    command: ["--mtu=1400"]
-
 variables:
-  DOCKER_DRIVER: overlay2
-  DOCKER_TLS_CERTDIR: "/certs"
   STACK_NAME: "worktime"
   # Теги образов: коммит + latest для удобства выката.
-  API_IMAGE: "$CI_REGISTRY_IMAGE/api"
-  WEB_IMAGE: "$CI_REGISTRY_IMAGE/web"
-
-.before_build: &docker_login
-  before_script:
-    - echo "Login to registry $CI_REGISTRY"
-    - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
+  API_IMAGE: "worktime-api"
+  WEB_IMAGE: "worktime-web"
 
 # Сборка backend-образа (FastAPI)
 build_api:
   stage: build
-  tags: ["docker"]  # runner с поддержкой docker+dind
-  <<: *docker_login
+  tags: ["docker"]  # runner с доступом к docker.sock хоста
   script:
     - export TAG="$CI_COMMIT_SHORT_SHA"
     - docker build -t "$API_IMAGE:$TAG" -t "$API_IMAGE:latest" -f backend/Dockerfile backend
-    - docker push "$API_IMAGE:$TAG"
-    - docker push "$API_IMAGE:latest"
   rules:
     - if: $CI_COMMIT_BRANCH
   artifacts:
@@ -50,12 +34,9 @@ build_api:
 build_web:
   stage: build
   tags: ["docker"]
-  <<: *docker_login
   script:
     - export TAG="$CI_COMMIT_SHORT_SHA"
     - docker build -t "$WEB_IMAGE:$TAG" -t "$WEB_IMAGE:latest" -f frontend/Dockerfile frontend
-    - docker push "$WEB_IMAGE:$TAG"
-    - docker push "$WEB_IMAGE:latest"
   rules:
     - if: $CI_COMMIT_BRANCH
   needs: ["build_api"]
@@ -64,42 +45,35 @@ build_web:
     when: on_failure
     paths: [".gitlab-ci.yml"]
 
-# Деплой стека на Swarm-менеджер через SSH.
+# Деплой стека на локальный Swarm (та же машина, где runner).
 deploy_stack:
   stage: deploy
-  tags: ["docker"]  # runner с docker образами; внутри ставим ssh-клиент
-  image: alpine:3.19
-  variables:
-    STACK_FILE_REMOTE: "/tmp/stack-worktime.yml"
-  before_script:
-    - apk add --no-cache openssh-client
-    - mkdir -p ~/.ssh && chmod 700 ~/.ssh
-    - echo "$SSH_PRIVATE_KEY" | tr -d '\r' | ssh-keygen -y >/dev/null 2>&1; true
-    - echo "$SSH_PRIVATE_KEY" | tr -d '\r' > ~/.ssh/id_rsa && chmod 600 ~/.ssh/id_rsa
-    - ssh-keyscan -p 22 "$SSH_HOST" >> ~/.ssh/known_hosts
+  tags: ["docker"]
   script:
-    - scp infra/stack-worktime.yml "$SSH_USER@$SSH_HOST:$STACK_FILE_REMOTE"
     - |
-      ssh "$SSH_USER@$SSH_HOST" << 'EOF'
-      set -e
-      echo "== Docker login on remote =="
-      echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
-      echo "== Deploy stack $STACK_NAME =="
-      docker stack deploy -c "$STACK_FILE_REMOTE" "$STACK_NAME"
-      echo "== Services =="
-      docker service ls
-      EOF
+      if [ "$(docker info --format '{{.Swarm.LocalNodeState}}')" != "active" ]; then
+        echo "== Init swarm =="
+        docker swarm init
+      else
+        echo "== Swarm already active =="
+      fi
+    - echo "== Deploy stack $STACK_NAME =="
+    - docker stack deploy -c infra/stack-worktime.yml "$STACK_NAME"
+    - echo "== Stack list =="
+    - docker stack ls
+    - echo "== Service list =="
+    - docker service ls
+    - echo "== Containers =="
+    - docker ps
   needs: ["build_api", "build_web"]
   rules:
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
   environment:
     name: production
-    url: http://$SSH_HOST
+    url: http://localhost
 
 # Примечания:
-# - Используется docker-in-docker для сборки. Runner должен иметь привязку к privileged или соответствующие права.
-# - Образы должны быть доступны на Swarm-узле из реестра GitLab; логин выполняется в deploy job перед выкатыванием.
-# - Перед деплоем на сервере должна лежать .env с секретами (POSTGRES_*, APP_DATABASE_URL и т.д.),
-#   либо значения должны быть уже прописаны в stack-worktime.yml через env переменные/секреты.
-# - Для воспроизведения в отчёте КР: описать стадии build -> push -> deploy, команды docker stack deploy,
+# - Используются локальные образы (без registry), поэтому деплой работает только на машине runner.
+# - Runner должен иметь доступ к /var/run/docker.sock хоста.
+# - Для воспроизведения в отчёте КР: описать стадии build -> deploy, команды docker stack deploy,
 #   и то, как overlay-сети и Traefik используются в стеке (см. infra/stack-worktime.yml).
