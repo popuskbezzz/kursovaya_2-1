@@ -45,7 +45,7 @@
 3) Проверка:
    - Web: http://localhost/
    - API health: http://localhost/api/health
-   - Traefik dashboard: http://localhost/traefik
+   - Traefik dashboard: http://localhost:8080/dashboard/
    - pgAdmin: http://localhost/pgadmin
 4) Миграции:
    - `docker compose -f infra/docker-compose.yml exec api alembic upgrade head`

@@ -6,6 +6,8 @@ entryPoints:
         readTimeout: "30s"
         writeTimeout: "30s"
         idleTimeout: "60s"
+  traefik:
+    address: ":8080"
 
 api:
   dashboard: true

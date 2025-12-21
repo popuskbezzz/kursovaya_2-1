@@ -1,7 +1,16 @@
 http:
+  routers:
+    traefik-dashboard:
+      # Dashboard UI uses /api/* endpoints on the same host.
+      rule: "PathPrefix(`/dashboard`) || PathPrefix(`/api`)"
+      entryPoints:
+        - "traefik"
+      service: "api@internal"
+      middlewares:
+        - "dashboard-auth"
   middlewares:
-    # Общий basic auth для dashboard. Значение можно переопределить через переменную окружения.
+    # Общий basic auth для dashboard (admin/admin).
     dashboard-auth:
       basicAuth:
         users:
-          - "${TRAEFIK_BASIC_AUTH:-admin:$$apr1$$Y9k5Uj1O$$TtyS4cYvhha3U07wpWQ3X.}"
+          - "admin:$apr1$0ZlCeJom$kak7Xh/2LM31cfleZjumU0"

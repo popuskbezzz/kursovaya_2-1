@@ -7,20 +7,13 @@ services:
     container_name: worktime-traefik
     ports:
       - "80:80"
+      - "8080:8080"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - ./traefik/traefik.yml:/etc/traefik/traefik.yml:ro
       - ./traefik/traefik_dynamic.yml:/etc/traefik/dynamic/traefik_dynamic.yml:ro
     networks:
       - proxy
-    labels:
-      - "traefik.enable=true"
-      # Dashboard: защищаем basic auth, переносим префикс /traefik на /dashboard/api/rawdata
-      - "traefik.http.routers.traefik-dashboard.rule=PathPrefix(`/traefik`) || PathPrefix(`/dashboard`) || PathPrefix(`/api/rawdata`)"
-      - "traefik.http.routers.traefik-dashboard.entrypoints=web"
-      - "traefik.http.routers.traefik-dashboard.service=api@internal"
-      - "traefik.http.routers.traefik-dashboard.middlewares=dashboard-auth,traefik-stripprefix"
-      - "traefik.http.middlewares.traefik-stripprefix.stripprefix.prefixes=/traefik"
 
   api:
     build:
@@ -31,6 +24,7 @@ services:
       - ../infra/.env
     environment:
       - APP_DATABASE_URL=${APP_DATABASE_URL}
+      - APP_AUTO_CREATE_SCHEMA=${APP_AUTO_CREATE_SCHEMA:-true}
     depends_on:
       db:
         condition: service_healthy
@@ -41,9 +35,9 @@ services:
       - "traefik.enable=true"
       - "traefik.http.routers.api.rule=PathPrefix(`/api`)"
       - "traefik.http.routers.api.entrypoints=web"
-      - "traefik.http.routers.api.middlewares=api-stripprefix"
+      - "traefik.http.routers.api.priority=10"
       - "traefik.http.services.api.loadbalancer.server.port=8000"
-      - "traefik.http.middlewares.api-stripprefix.stripprefix.prefixes=/api"
+      - "traefik.docker.network=worktime_proxy"
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:8000/api/health || exit 1"]
       interval: 15s
@@ -68,7 +62,9 @@ services:
       - "traefik.enable=true"
       - "traefik.http.routers.web.rule=PathPrefix(`/`)"
       - "traefik.http.routers.web.entrypoints=web"
+      - "traefik.http.routers.web.priority=1"
       - "traefik.http.services.web.loadbalancer.server.port=80"
+      - "traefik.docker.network=worktime_proxy"
 
   db:
     image: postgres:16
@@ -120,11 +116,13 @@ services:
       - "traefik.http.middlewares.pgadmin-headers.headers.customrequestheaders.X-Script-Name=/pgadmin"
       - "traefik.http.middlewares.pgadmin-headers.headers.customrequestheaders.X-Forwarded-Prefix=/pgadmin"
       - "traefik.http.middlewares.pgadmin-headers.headers.customrequestheaders.X-Scheme=http"
+      - "traefik.docker.network=worktime_proxy"
 
 # Сети: proxy — публичный вход (Traefik/web/api/pgadmin), backend — приватная БД/админка
 networks:
   proxy:
     driver: bridge
+    name: worktime_proxy
   backend:
     driver: bridge
 
